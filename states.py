@@ -58,7 +58,7 @@ class ChangeMasterPassword(StatesGroup):
     waiting_for_new_confirm  = State()
 
 
-
+class AdminBroadcast(StatesGroup):
     """Admin: reklama yuborish."""
     waiting_for_message = State()
     waiting_for_confirm = State()
