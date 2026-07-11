@@ -37,9 +37,8 @@ WORKDIR /app
 # Builder'dan o'rnatilgan paketlarni ko'chirish
 COPY --from=builder /install /usr/local
 
-# Bot kodini ko'chirish
-COPY config.py database.py security.py middlewares.py states.py keyboards.py .
-COPY handlers_user.py handlers_admin.py main.py .
+# Bot kodini ko'chirish — barcha .py fayllar
+COPY *.py ./
 
 # Fayllar egasini o'rnatish
 RUN chown -R cyberkeep:cyberkeep /app
