@@ -2,6 +2,7 @@ import asyncio
 import datetime
 import logging
 import os
+import sys
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -13,28 +14,38 @@ logging.basicConfig(
     level=logging.INFO
 )
 
-# --- Environment variables orqali olinadi (Railway da sozlanadi) ---
-API_ID = int(os.environ.get("API_ID", "33255751"))
-API_HASH = os.environ.get("API_HASH", "0b819489997c5c75cfcc4d1c4f6fa6a9")
+# --- Environment variables ---
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
 SESSION_STRING = os.environ.get("SESSION_STRING", "")
-# ------------------------------------------------------------------
 
-if SESSION_STRING:
-    # Railway da StringSession ishlatiladi (fayl saqlab bo'lmaydi)
-    client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
-else:
-    # Lokal ishlatganda fayl session ishlatiladi
-    client = TelegramClient("soat_sessiyasi", API_ID, API_HASH)
+# SESSION_STRING majburiy — yo'q bo'lsa ishga tushmaydi
+if not SESSION_STRING:
+    print("❌ XATO: SESSION_STRING environment variable topilmadi!")
+    print("Railway -> Variables bo'limiga SESSION_STRING qo'shing.")
+    sys.exit(1)
+
+if not API_ID or not API_HASH:
+    print("❌ XATO: API_ID yoki API_HASH topilmadi!")
+    sys.exit(1)
+
+client = TelegramClient(StringSession(SESSION_STRING), API_ID, API_HASH)
 
 
 async def main():
-    await client.start()
-    print("Userbot muvaffaqiyatli ishga tushdi!")
+    await client.connect()
+
+    if not await client.is_user_authorized():
+        print("❌ XATO: Session yaroqsiz! Yangi SESSION_STRING oling.")
+        sys.exit(1)
+
+    me = await client.get_me()
+    print(f"✅ Userbot ishga tushdi! Hisob: {me.first_name}")
 
     oxirgi_vaqt = ""
 
     while True:
-        # UTC+5 (Toshkent vaqti) ga moslashtirish
+        # UTC+5 (Toshkent vaqti)
         toshkent_vaqt = datetime.datetime.utcnow() + datetime.timedelta(hours=5)
         hozirgi_vaqt = toshkent_vaqt.strftime("%H:%M")
 
@@ -42,9 +53,9 @@ async def main():
             try:
                 await client(UpdateProfileRequest(first_name=hozirgi_vaqt, last_name=""))
                 oxirgi_vaqt = hozirgi_vaqt
-                print(f"Profil ismi o'zgartirildi: {hozirgi_vaqt}")
+                print(f"✅ Vaqt yangilandi: {hozirgi_vaqt}")
             except Exception as e:
-                print(f"Xatolik yuz berdi: {e}")
+                print(f"❌ Xatolik: {e}")
 
         await asyncio.sleep(15)
 
