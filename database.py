@@ -633,33 +633,40 @@ class LegacyRepo:
 
 async def create_tables() -> None:
     """
-    Barcha jadvallarni yaratadi va yetishmayotgan ustunlarni qo'shadi.
-    Mavjud jadval bo'lsa o'zgartirmaydi — lekin yangi ustunlar ADD COLUMN bilan qo'shiladi.
+    Barcha jadvallarni yaratadi.
+    Agar users jadvali eski/to'liqsiz strukturada bo'lsa — DROP CASCADE qilib qayta yaratadi.
+    Baza bo'sh bo'lgani uchun ma'lumot yo'qolmaydi.
     """
     async with engine.begin() as conn:
-        # Jadvallarni yaratish (yangi o'rnatishlar uchun)
+        try:
+            # users jadvalidagi ustunlarni tekshir
+            result = await conn.execute(text(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'users' AND table_schema = 'public'"
+            ))
+            existing_cols = {row[0] for row in result.fetchall()}
+
+            required_cols = {
+                "id", "username", "full_name", "master_hash",
+                "encryption_salt", "is_premium", "premium_until",
+                "heir_user_id", "created_at", "last_active"
+            }
+            missing = required_cols - existing_cols
+
+            if missing and existing_cols:
+                # Eski struktura — barcha jadvallarni o'chir va qayta yarat
+                tables = [
+                    "login_attempts", "blocked_users", "digital_legacy",
+                    "totp_devices", "burner_links", "secret_files",
+                    "passwords", "users"
+                ]
+                for t in tables:
+                    await conn.execute(text(f"DROP TABLE IF EXISTS {t} CASCADE"))
+        except Exception:
+            pass  # Jadval umuman yo'q bo'lsa — keyingi qadamda yaratiladi
+
+        # To'g'ri strukturada barcha jadvallarni yarat
         await conn.run_sync(Base.metadata.create_all)
-
-        # ── Migration: yetishmayotgan ustunlarni qo'shish ──────────────────
-        # Eski bazalarda bo'lmasligi mumkin bo'lgan ustunlar
-        migrations = [
-            # (jadval, ustun, SQL turi)
-            ("users", "full_name",       "VARCHAR(128)"),
-            ("users", "username",        "VARCHAR(64)"),
-            ("users", "heir_user_id",    "BIGINT"),
-            ("users", "is_premium",      "BOOLEAN DEFAULT FALSE"),
-            ("users", "premium_until",   "TIMESTAMPTZ"),
-            ("users", "encryption_salt", "BYTEA"),
-            ("users", "last_active",     "TIMESTAMPTZ DEFAULT NOW()"),
-        ]
-
-        for table, column, col_type in migrations:
-            try:
-                await conn.execute(
-                    text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}")
-                )
-            except Exception:
-                pass  # Ustun allaqachon mavjud yoki jadval yo'q — o'tkazib yuboramiz
 
 
 class SecurityRepo:
