@@ -23,7 +23,7 @@ from typing import Optional, List
 
 from sqlalchemy import (
     BigInteger, String, Boolean, DateTime, LargeBinary,
-    Integer, Text, ForeignKey, select, delete, func, update
+    Integer, Text, ForeignKey, select, delete, func, update, text
 )
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.ext.asyncio import (
@@ -632,9 +632,34 @@ class LegacyRepo:
 # ─────────────────────────────────────────────────────────────────────────────
 
 async def create_tables() -> None:
-    """Barcha jadvallarni PostgreSQL'da yaratadi (mavjud bo'lsa o'zgarmaydi)."""
+    """
+    Barcha jadvallarni yaratadi va yetishmayotgan ustunlarni qo'shadi.
+    Mavjud jadval bo'lsa o'zgartirmaydi — lekin yangi ustunlar ADD COLUMN bilan qo'shiladi.
+    """
     async with engine.begin() as conn:
+        # Jadvallarni yaratish (yangi o'rnatishlar uchun)
         await conn.run_sync(Base.metadata.create_all)
+
+        # ── Migration: yetishmayotgan ustunlarni qo'shish ──────────────────
+        # Eski bazalarda bo'lmasligi mumkin bo'lgan ustunlar
+        migrations = [
+            # (jadval, ustun, SQL turi)
+            ("users", "full_name",       "VARCHAR(128)"),
+            ("users", "username",        "VARCHAR(64)"),
+            ("users", "heir_user_id",    "BIGINT"),
+            ("users", "is_premium",      "BOOLEAN DEFAULT FALSE"),
+            ("users", "premium_until",   "TIMESTAMPTZ"),
+            ("users", "encryption_salt", "BYTEA"),
+            ("users", "last_active",     "TIMESTAMPTZ DEFAULT NOW()"),
+        ]
+
+        for table, column, col_type in migrations:
+            try:
+                await conn.execute(
+                    text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {col_type}")
+                )
+            except Exception:
+                pass  # Ustun allaqachon mavjud yoki jadval yo'q — o'tkazib yuboramiz
 
 
 class SecurityRepo:
