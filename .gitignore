@@ -1,5 +1,52 @@
-*.session
-*.session-journal
+# Maxfiy fayllar — GIT'ga HECH QACHON qo'shmang
+.env
+*.env
+secrets.*
+*.pem
+*.key
+*.p12
+*.pfx
+
+# SQLite lokal test bazasi — production ma'lumotlari bo'lishi mumkin
+*.db
+*.sqlite
+*.sqlite3
+
+# Python
 __pycache__/
 *.pyc
-.env
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+env/
+pip-log.txt
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+logs/
+
+# Docker
+.dockerignore
+
+# Test & coverage
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Temp
+tmp/
+temp/
+*.tmp

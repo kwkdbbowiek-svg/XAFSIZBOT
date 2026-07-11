@@ -1,2 +1,25 @@
-telethon==1.36.0
-cryptg==0.4.0
+# ─── Telegram Bot Framework ───────────────────────────────────────────────────
+aiogram==3.13.1
+
+# ─── PostgreSQL Driver (Async) ─────────────────────────────────────────────────
+asyncpg==0.29.0
+
+# ─── ORM ──────────────────────────────────────────────────────────────────────
+SQLAlchemy==2.0.36
+
+# ─── Xavfsizlik: Shifrlash ─────────────────────────────────────────────────────
+# argon2id — master parolni hashlash (GPU/ASIC brute-force himoya)
+argon2-cffi==23.1.0
+
+# ChaCha20-Poly1305 — authenticated encryption
+cryptography==43.0.3
+
+# ─── 2FA / TOTP ───────────────────────────────────────────────────────────────
+pyotp==2.9.0
+qrcode[pil]==8.0
+
+# ─── Config / Environment ─────────────────────────────────────────────────────
+python-dotenv==1.0.1
+
+# ─── Asinxron HTTP (aiogram dependency) ───────────────────────────────────────
+aiohttp==3.10.10
