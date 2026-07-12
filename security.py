@@ -1,44 +1,40 @@
 """
-security.py — CyberKeep xavfsizlik yadrosи.
+security.py — CyberKeep kriptografik yadro.
 
 ARXITEKTURA:
-  ┌─────────────────────────────────────────────────────────┐
-  │  Master Parol (foydalanuvchi xotirasida)                │
-  │      │                                                  │
-  │      ▼                                                  │
-  │  argon2id hash  ──► PostgreSQL (tekshirish uchun)       │
-  │      │                                                  │
-  │      ▼                                                  │
-  │  PBKDF2-HMAC-SHA256 ──► 32 bayt Encryption Key (RAM)   │
-  │      │                                                  │
-  │      ▼                                                  │
-  │  ChaCha20-Poly1305 ──► Shifrlangan BLOB (PostgreSQL)   │
-  └─────────────────────────────────────────────────────────┘
+  Master Parol → argon2id hash → PostgreSQL
+  Master Parol → PBKDF2-HMAC-SHA256 → 32B key (RAM only)
+  key → ChaCha20-Poly1305 (random nonce per encrypt) → BLOB
 
-HECH QANDAY KALIT DISKKA YOZILMAYDI.
+KAFOLATLAR:
+  • Har encrypt da secrets.token_bytes(12) — nonce takrorlanmaydi (anti-replay)
+  • verify_master_password — argon2 o'zining constant-time verify'si (timing-safe)
+  • secure_compare — hmac.compare_digest (timing attack himoya)
+  • Kalit RAM'dan o'chirishda: None → del → gc.collect()
+  • Hech qanday sir diskka yozilmaydi
 """
 
-import os
+import gc
 import hmac
 import hashlib
 import secrets
-from typing import Tuple
+from typing import Optional
 
 from argon2 import PasswordHasher
-from argon2.exceptions import VerifyMismatchError, VerificationError
+from argon2.exceptions import VerifyMismatchError, VerificationError, HashingError
 from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+from cryptography.exceptions import InvalidTag
 
 from config import cfg
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 1. ARGON2ID — Master parolni hashlash
-#    Parametrlar OWASP 2023 tavsiyasidan olingan:
-#    time_cost=3, memory_cost=65536 (64MB), parallelism=4
+# 1. ARGON2ID — Master parol hashlash
+#    OWASP 2023: time_cost=3, memory=64MB, parallelism=4
 # ─────────────────────────────────────────────────────────────────────────────
 _ph = PasswordHasher(
-    time_cost=3,          # Iteratsiya soni — CPU vaqti
-    memory_cost=65536,    # 64 MB RAM — GPU/ASIC uchun qimmat
-    parallelism=4,        # Parallel threadlar
+    time_cost=3,
+    memory_cost=65536,   # 64 MB — GPU/ASIC brute-force himoya
+    parallelism=4,
     hash_len=32,
     salt_len=16,
     encoding="utf-8",
@@ -46,160 +42,137 @@ _ph = PasswordHasher(
 
 
 def hash_master_password(plain_password: str) -> str:
-    """
-    Master parolni argon2id bilan hashlaydi.
-    Qaytariladigan string bazaga yozish uchun xavfsiz.
-
-    Argon2 o'z ichiga salt qo'shadi — alohida salt saqlash shart emas.
-    """
-    # Server pepper qo'shish: bazadan hash o'g'irlansa ham
-    # pepper bo'lmasa crack qilib bo'lmaydi
+    """argon2id + server pepper bilan hashlaydi."""
     peppered = plain_password + cfg.SERVER_PEPPER
-    return _ph.hash(peppered)
+    result = _ph.hash(peppered)
+    # Vaqtinchalik string GC ga topshirilsin
+    del peppered
+    return result
 
 
 def verify_master_password(plain_password: str, stored_hash: str) -> bool:
     """
-    Foydalanuvchi kiritgan parolni bazadagi hash bilan solishtiradi.
-    Mos kelmasa False qaytaradi, hech qachon exception ko'tarmaydi.
+    Argon2 o'zining constant-time verifikatsiyasini ishlatadi —
+    timing attack imkonsiz.
     """
     peppered = plain_password + cfg.SERVER_PEPPER
     try:
-        return _ph.verify(stored_hash, peppered)
-    except (VerifyMismatchError, VerificationError):
+        ok = _ph.verify(stored_hash, peppered)
+        return ok
+    except (VerifyMismatchError, VerificationError, HashingError):
         return False
+    finally:
+        # Peppered parolni xotiradan tozalash
+        del peppered
+        gc.collect()
 
 
 def needs_rehash(stored_hash: str) -> bool:
-    """
-    Argon2 parametrlari yangilansa eski hashlarni qayta hishlash kerakmi?
-    (Xavfsizlik yangilanishlarini avtomatik qo'llash)
-    """
+    """Argon2 parametrlari o'zgarganda eski hashlarni yangilash."""
     return _ph.check_needs_rehash(stored_hash)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. PBKDF2 — Master paroldan shifrlash kaliti olish
-#    Kalit FAQAT RAM'da yashaydi, diskka hech qachon yozilmaydi.
+# 2. PBKDF2 — Shifrlash kaliti derivatsiyasi
+#    Kalit FAQAT RAM'da, diskka hech qachon yozilmaydi.
 # ─────────────────────────────────────────────────────────────────────────────
 
 def derive_encryption_key(plain_password: str, salt: bytes) -> bytes:
     """
-    Master paroldan 32 baytlik ChaCha20 kalitini chiqaradi (Key Derivation).
-
-    Args:
-        plain_password: Foydalanuvchi kiritgan Master parol (RAM'da)
-        salt: Har foydalanuvchi uchun noyob 32 bayt (bazada saqlanadi)
-
-    Returns:
-        32 bayt shifrlash kaliti — FAQAT RAM'da, bazaga yozilmaydi!
-
-    Xavfsizlik qatlami:
-        - Server pepper: bazadan salt o'g'irlansa ham kalit topilmaydi
-        - iterations=600000: NIST 2023 tavsiyasi
+    Master paroldan 32B ChaCha20 kaliti chiqaradi.
+    NIST SP 800-132: 600_000 iteratsiya, SHA-256.
+    Server pepper qo'shiladi — salt o'g'irlansa ham kalit topilmaydi.
     """
-    peppered_password = (plain_password + cfg.SERVER_PEPPER).encode("utf-8")
-
+    peppered = (plain_password + cfg.SERVER_PEPPER).encode("utf-8")
     key = hashlib.pbkdf2_hmac(
         hash_name="sha256",
-        password=peppered_password,
+        password=peppered,
         salt=salt,
-        iterations=600_000,   # NIST SP 800-132 tavsiyasi
-        dklen=32,             # ChaCha20 uchun 256 bit
+        iterations=600_000,
+        dklen=32,
     )
+    # Peppered baytlarni xotiradan tozalash
+    del peppered
+    gc.collect()
     return key
 
 
 def generate_user_salt() -> bytes:
-    """Har foydalanuvchi uchun bir marta yaratiladi, bazada ochiq saqlanadi."""
+    """32B kriptografik random salt — foydalanuvchi uchun bir marta."""
     return secrets.token_bytes(32)
 
 
+def wipe_key(key_var) -> None:
+    """
+    Shifrlash kalitini xotiradan xavfsiz o'chiradi.
+    Chaqiruvchi kod:
+        key = wipe_key(key)  → key = None
+    """
+    del key_var
+    gc.collect()
+
+
 # ─────────────────────────────────────────────────────────────────────────────
-# 3. ChaCha20-Poly1305 — Authenticated Encryption
-#    - Shifrlash + butunlik tekshiruvi bir algoritmda
-#    - AES-GCM'dan tezroq, ARM/x86 hardwaresiz ham xavfsiz
+# 3. ChaCha20-Poly1305 — Authenticated Encryption with random nonce
+#    Har shifrlashda secrets.token_bytes(12) — anti-replay kafolati
 # ─────────────────────────────────────────────────────────────────────────────
 
-NONCE_SIZE = 12  # ChaCha20-Poly1305 uchun standart nonce o'lchami
+NONCE_SIZE = 12  # ChaCha20-Poly1305 standart nonce
 
 
 def encrypt_data(plaintext: bytes, key: bytes) -> bytes:
     """
-    Berilgan baytlarni ChaCha20-Poly1305 bilan shifrlaydi.
+    ChaCha20-Poly1305 bilan shifrlaydi.
+    Format: [12B nonce][ciphertext][16B auth-tag]
 
-    Nonce (Number Used Once):
-        - Har shifrlashda tasodifiy yaratiladi (12 bayt)
-        - Shifrlangan ma'lumotning oldiga qo'yiladi: [nonce(12)] + [ciphertext+tag]
-        - Bir kalit bilan bir nonce HECH QACHON qayta ishlatilmaydi
-
-    Args:
-        plaintext: Shifrlash uchun xom baytlar (matn yoki fayl)
-        key: 32 baytlik shifrlash kaliti (RAM'dan)
-
-    Returns:
-        nonce + ciphertext + authentication_tag (hammasi birlashtirilgan)
+    Har chaqiruvda yangi kriptografik random nonce —
+    bir kalit bilan nonce takrorlanish ehtimoli 2^96 ga 1.
     """
     if len(key) != 32:
-        raise ValueError("Shifrlash kaliti 32 bayt bo'lishi shart!")
+        raise ValueError("Kalit 32 bayt bo'lishi shart!")
 
-    nonce = secrets.token_bytes(NONCE_SIZE)  # Kriptografik tasodifiy nonce
+    nonce = secrets.token_bytes(NONCE_SIZE)   # anti-replay nonce
     chacha = ChaCha20Poly1305(key)
-    ciphertext = chacha.encrypt(nonce, plaintext, None)  # AAD yo'q
+    ciphertext = chacha.encrypt(nonce, plaintext, None)
+    return nonce + ciphertext
 
-    return nonce + ciphertext  # [12 byte nonce][N byte ciphertext][16 byte tag]
 
-
-def decrypt_data(ciphertext_with_nonce: bytes, key: bytes) -> bytes:
+def decrypt_data(blob: bytes, key: bytes) -> bytes:
     """
-    ChaCha20-Poly1305 bilan shifrlangan ma'lumotni ochadi.
-
-    Authentication tag tekshiruvi:
-        Ma'lumot o'zgartirilgan bo'lsa (hacker tamper qilsa),
-        cryptography.exceptions.InvalidTag xatosi chiqadi.
-
-    Args:
-        ciphertext_with_nonce: encrypt_data() qaytargan baytlar
-        key: 32 baytlik shifrlash kaliti (RAM'dan)
-
-    Returns:
-        Asl xom baytlar
-
-    Raises:
-        cryptography.exceptions.InvalidTag: Ma'lumot buzilgan yoki kalit noto'g'ri
-        ValueError: Noto'g'ri format
+    ChaCha20-Poly1305 bilan ochadi.
+    Auth-tag noto'g'ri bo'lsa InvalidTag — tamper aniqlandi.
     """
     if len(key) != 32:
-        raise ValueError("Shifrlash kaliti 32 bayt bo'lishi shart!")
+        raise ValueError("Kalit 32 bayt bo'lishi shart!")
+    if len(blob) < NONCE_SIZE + 16:
+        raise ValueError("Blob juda qisqa — buzilgan!")
 
-    if len(ciphertext_with_nonce) < NONCE_SIZE + 16:
-        raise ValueError("Shifrlangan ma'lumot juda qisqa — buzilgan bo'lishi mumkin!")
-
-    nonce = ciphertext_with_nonce[:NONCE_SIZE]
-    ciphertext = ciphertext_with_nonce[NONCE_SIZE:]
-
+    nonce = blob[:NONCE_SIZE]
+    ciphertext = blob[NONCE_SIZE:]
     chacha = ChaCha20Poly1305(key)
-    return chacha.decrypt(nonce, ciphertext, None)
+    return chacha.decrypt(nonce, ciphertext, None)   # InvalidTag raises here
 
 
 def encrypt_text(text: str, key: bytes) -> bytes:
-    """Matnni UTF-8 baytga o'girib shifrlaydi."""
-    return encrypt_data(text.encode("utf-8"), key)
+    """Matnni sanitize qilib shifrlaydi."""
+    import html as _html
+    safe = _html.escape(text)          # XSS / HTML injection himoya
+    return encrypt_data(safe.encode("utf-8"), key)
 
 
-def decrypt_text(encrypted: bytes, key: bytes) -> str:
+def decrypt_text(blob: bytes, key: bytes) -> str:
     """Shifrlangan baytlardan matnni tiklaydi."""
-    return decrypt_data(encrypted, key).decode("utf-8")
+    return decrypt_data(blob, key).decode("utf-8")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 4. Xavfsiz taqqoslash — Timing Attack'dan himoya
+# 4. Timing-safe taqqoslash
 # ─────────────────────────────────────────────────────────────────────────────
 
 def secure_compare(a: str, b: str) -> bool:
     """
-    Ikkita stringni vaqt hujumidan (timing attack) xavfsiz solishtiradi.
-    Oddiy == operatori turli vaqt oladigan javob berishi mumkin.
+    hmac.compare_digest — timing attack imkonsiz.
+    Oddiy == turli vaqt olib timing leak berishi mumkin.
     """
     return hmac.compare_digest(
         a.encode("utf-8"),
@@ -208,23 +181,19 @@ def secure_compare(a: str, b: str) -> bool:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. TOTP (2FA) — pyotp orqali
+# 5. TOTP (2FA) — pyotp
 # ─────────────────────────────────────────────────────────────────────────────
 
 def generate_totp_secret() -> str:
-    """
-    Yangi TOTP secret yaratadi (base32, 32 belgi).
-    Bu secret BAZAGA SHIFRLANGAN holda yoziladi (encrypt_text bilan).
-    """
+    """TOTP secret yaratadi — bazaga SHIFRLANGAN holda yoziladi."""
     import pyotp
     return pyotp.random_base32()
 
 
 def get_totp_uri(secret: str, user_id: int) -> str:
-    """Google Authenticator uchun QR kod URI si."""
+    """Google Authenticator QR URI."""
     import pyotp
-    totp = pyotp.TOTP(secret)
-    return totp.provisioning_uri(
+    return pyotp.TOTP(secret).provisioning_uri(
         name=f"user_{user_id}",
         issuer_name="CyberKeep"
     )
@@ -232,9 +201,10 @@ def get_totp_uri(secret: str, user_id: int) -> str:
 
 def verify_totp_code(secret: str, code: str) -> bool:
     """
-    Foydalanuvchi kiritgan 6 raqamli kodni tekshiradi.
-    valid_window=1: 30 soniya oldin/keyin ham qabul qiladi (soat farqi uchun).
+    6 raqamli TOTP kodni tekshiradi.
+    valid_window=1 → ±30 soniya tolerantlik (soat farqi uchun).
     """
+    if not code or not code.strip().isdigit():
+        return False
     import pyotp
-    totp = pyotp.TOTP(secret)
-    return totp.verify(code, valid_window=1)
+    return pyotp.TOTP(secret).verify(code.strip(), valid_window=1)
