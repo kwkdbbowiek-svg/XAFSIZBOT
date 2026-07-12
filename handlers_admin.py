@@ -264,9 +264,14 @@ async def _apply_premium(event, state: FSMContext, session: AsyncSession,
         f"⏰ Muddati: <b>{new_until.strftime('%d.%m.%Y %H:%M')}</b> UTC"
     )
 
-    if hasattr(event, "edit_text"):
-        await event.edit_text(reply_text, parse_mode="HTML", reply_markup=kb.admin_kb())
+    if hasattr(event, "edit_text") and hasattr(event, "message_id"):
+        # CallbackQuery.message — edit qilish mumkin
+        try:
+            await event.edit_text(reply_text, parse_mode="HTML", reply_markup=kb.admin_kb())
+        except Exception:
+            await event.answer(reply_text, parse_mode="HTML", reply_markup=kb.admin_kb())
     else:
+        # Message — yangi xabar yuborish
         await event.answer(reply_text, parse_mode="HTML", reply_markup=kb.admin_kb())
 
     await state.set_state(None)
